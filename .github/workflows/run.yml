@@ -1,5 +1,8 @@
 name: Run KDP Scraper
 
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: "0 * * * *"   # runs every hour
