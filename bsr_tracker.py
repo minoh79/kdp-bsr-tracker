@@ -151,18 +151,13 @@ def save(data):
     except FileNotFoundError:
         pass
 
-    # clean numeric types
-    if "bsr" in df.columns:
-        df["bsr"] = pd.to_numeric(df["bsr"], errors="coerce").astype("Int64")
-
-    if "category_rank" in df.columns:
-        df["category_rank"] = pd.to_numeric(df["category_rank"], errors="coerce").astype("Int64")
-
-    # remove duplicates safely
+    # -----------------------------
+    # DO NOT REMOVE HISTORY
+    # -----------------------------
+    # Only remove exact duplicates from the SAME run if they happen
     df = df.drop_duplicates()
 
     df.to_csv("bsr_data.csv", index=False)
-
     print("Saved to CSV")
 
 # -----------------------------
