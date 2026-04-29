@@ -2,8 +2,6 @@ from playwright.sync_api import sync_playwright
 from datetime import datetime
 import pandas as pd
 import re
-import random
-import time
 
 ASINS = [
     "B0D9JQ33BX","B0D1MYMVCC","B0CSZDC243","B0D3XXZRRC","B0D3XXY1HV",
@@ -33,16 +31,24 @@ def extract_bsr(text):
 # -----------------------------
 def extract_category_ranks(page):
     try:
-        text = page.inner_text("body")
+        bsr_block = page.locator("#detailBulletsWrapper_feature_div").inner_text()
+        lines = bsr_block.split("\n")
 
         categories = []
-        matches = re.findall(r"#([\d,]+)\s+in\s+([^\n(]+)", text)
 
-        for rank, cat in matches:
-            categories.append({
-                "rank": int(rank.replace(",", "")),
-                "category": cat.strip()
-            })
+        for line in lines:
+            if "#" in line and "in" in line:
+                parts = line.split(" in ")
+                if len(parts) == 2:
+                    rank_part = parts[0]
+                    category_part = parts[1]
+
+                    rank = int(''.join(filter(str.isdigit, rank_part)))
+
+                    categories.append({
+                        "rank": rank,
+                        "category": category_part.strip()
+                    })
 
         return categories
 
@@ -50,31 +56,52 @@ def extract_category_ranks(page):
         return []
 
 # -----------------------------
-# TITLE EXTRACTION (FLEXIBLE)
+# TITLE EXTRACTION (IMPROVED)
 # -----------------------------
 def get_title(page, asin):
-    try:
-        # try multiple sources WITHOUT strict waits
-        selectors = ["#productTitle", "span#productTitle", "h1"]
+    for attempt in range(3):
+        try:
+            # wait for ANY possible title element
+            page.wait_for_selector(
+                "#productTitle, span#productTitle, h1",
+                timeout=20000
+            )
 
-        for sel in selectors:
-            el = page.query_selector(sel)
-            if el:
-                txt = el.inner_text().strip()
-                if txt:
-                    return clean_title(txt)
+            title = None
 
-        # og:title fallback
-        og = page.query_selector('meta[property="og:title"]')
-        if og:
-            content = og.get_attribute("content")
-            if content:
-                return clean_title(content.strip())
+            # try multiple selectors
+            selectors = [
+                "#productTitle",
+                "span#productTitle",
+                "h1"
+            ]
 
-    except:
-        pass
+            for sel in selectors:
+                el = page.query_selector(sel)
+                if el:
+                    text = el.inner_text().strip()
+                    if text:
+                        title = text
+                        break
 
-    print(f"FAILED TITLE: {asin}", flush=True)
+            # fallback: og:title
+            if not title:
+                og = page.query_selector('meta[property="og:title"]')
+                if og:
+                    content = og.get_attribute("content")
+                    if content:
+                        title = content.strip()
+
+            if title:
+                return clean_title(title)
+
+            raise Exception("No title found")
+
+        except:
+            print(f"Retry {attempt+1} for {asin} (title)", flush=True)
+            page.reload()
+            page.wait_for_timeout(6000)
+
     return None
 
 # -----------------------------
@@ -86,26 +113,26 @@ def scrape():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+        page = browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
         )
-
-        page = context.new_page()
 
         for asin in ASINS:
             print("START ASIN:", asin, flush=True)
 
             try:
                 url = f"https://www.amazon.com/dp/{asin}"
+
                 page.goto(url, timeout=60000)
 
-                # RANDOM delay (huge for avoiding blocks)
-                time.sleep(random.uniform(5, 9))
+                # longer wait for cloud environments
+                page.wait_for_timeout(12000)
 
-                # light human-like behavior
-                page.mouse.wheel(0, random.randint(1500, 3000))
-                time.sleep(random.uniform(1, 2))
+                # light interaction (helps lazy load)
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(1000)
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(1000)
 
                 # -----------------------------
                 # TITLE
@@ -113,18 +140,13 @@ def scrape():
                 title = get_title(page, asin)
 
                 if not title:
+                    print(f"FAILED to load {asin}", flush=True)
                     continue
 
                 # -----------------------------
                 # BSR + CATEGORY
                 # -----------------------------
                 body_text = page.inner_text("body")
-
-                # detect bot block page
-                if "captcha" in body_text.lower():
-                    print(f"BLOCKED by Amazon on {asin}", flush=True)
-                    continue
-
                 bsr = extract_bsr(body_text)
                 categories = extract_category_ranks(page)
 
@@ -150,9 +172,6 @@ def scrape():
 
                 print("DONE:", asin, "BSR:", bsr, "Categories:", len(categories), flush=True)
 
-                # delay between ASINs (VERY important)
-                time.sleep(random.uniform(4, 8))
-
             except Exception as e:
                 print(f"ERROR on {asin}: {e}", flush=True)
                 continue
@@ -173,6 +192,7 @@ def save(data):
     except FileNotFoundError:
         pass
 
+    # keep history, only remove exact duplicates
     df = df.drop_duplicates(subset=["timestamp", "asin", "category", "category_rank", "bsr"])
 
     # fix .0 issue
