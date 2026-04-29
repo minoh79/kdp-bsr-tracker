@@ -56,12 +56,11 @@ def extract_category_ranks(page):
         return []
 
 # -----------------------------
-# TITLE EXTRACTION (IMPROVED)
+# TITLE EXTRACTION
 # -----------------------------
 def get_title(page, asin):
     for attempt in range(3):
         try:
-            # wait for ANY possible title element
             page.wait_for_selector(
                 "#productTitle, span#productTitle, h1",
                 timeout=20000
@@ -69,14 +68,7 @@ def get_title(page, asin):
 
             title = None
 
-            # try multiple selectors
-            selectors = [
-                "#productTitle",
-                "span#productTitle",
-                "h1"
-            ]
-
-            for sel in selectors:
+            for sel in ["#productTitle", "span#productTitle", "h1"]:
                 el = page.query_selector(sel)
                 if el:
                     text = el.inner_text().strip()
@@ -84,7 +76,6 @@ def get_title(page, asin):
                         title = text
                         break
 
-            # fallback: og:title
             if not title:
                 og = page.query_selector('meta[property="og:title"]')
                 if og:
@@ -105,6 +96,31 @@ def get_title(page, asin):
     return None
 
 # -----------------------------
+# BSR EXTRACTION (ROBUST)
+# -----------------------------
+def get_bsr_and_categories(page, asin):
+    for attempt in range(2):
+        try:
+            # wait specifically for BSR container
+            page.wait_for_selector("#detailBulletsWrapper_feature_div", timeout=15000)
+
+            body_text = page.inner_text("body")
+            bsr = extract_bsr(body_text)
+            categories = extract_category_ranks(page)
+
+            if bsr or categories:
+                return bsr, categories
+
+            raise Exception("BSR not found")
+
+        except:
+            print(f"Retry {attempt+1} for {asin} (BSR)", flush=True)
+            page.reload()
+            page.wait_for_timeout(8000)
+
+    return None, []
+
+# -----------------------------
 # SCRAPER
 # -----------------------------
 def scrape():
@@ -114,7 +130,7 @@ def scrape():
         browser = p.chromium.launch(headless=True)
 
         page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
 
         for asin in ASINS:
@@ -122,33 +138,23 @@ def scrape():
 
             try:
                 url = f"https://www.amazon.com/dp/{asin}"
-
                 page.goto(url, timeout=60000)
 
-                # longer wait for cloud environments
                 page.wait_for_timeout(12000)
 
-                # light interaction (helps lazy load)
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
 
-                # -----------------------------
                 # TITLE
-                # -----------------------------
                 title = get_title(page, asin)
-
                 if not title:
-                    print(f"FAILED to load {asin}", flush=True)
+                    print(f"FAILED TITLE: {asin}", flush=True)
                     continue
 
-                # -----------------------------
-                # BSR + CATEGORY
-                # -----------------------------
-                body_text = page.inner_text("body")
-                bsr = extract_bsr(body_text)
-                categories = extract_category_ranks(page)
+                # BSR + CATEGORY (NEW ROBUST LOGIC)
+                bsr, categories = get_bsr_and_categories(page, asin)
 
                 if categories:
                     for c in categories:
@@ -192,10 +198,9 @@ def save(data):
     except FileNotFoundError:
         pass
 
-    # keep history, only remove exact duplicates
     df = df.drop_duplicates(subset=["timestamp", "asin", "category", "category_rank", "bsr"])
 
-    # fix .0 issue
+    # fix numeric formatting
     if "bsr" in df.columns:
         df["bsr"] = pd.to_numeric(df["bsr"], errors="coerce").astype("Int64")
 
