@@ -56,31 +56,41 @@ def extract_category_ranks(page):
         return []
 
 # -----------------------------
-# TITLE EXTRACTION (ROBUST)
+# TITLE EXTRACTION (IMPROVED)
 # -----------------------------
 def get_title(page, asin):
-    title = None
-
     for attempt in range(3):
         try:
-            page.wait_for_timeout(3000)
+            # wait for ANY possible title element
+            page.wait_for_selector(
+                "#productTitle, span#productTitle, h1",
+                timeout=20000
+            )
 
-            # 1. productTitle
-            el = page.query_selector("#productTitle")
-            if el:
-                title = el.inner_text().strip()
+            title = None
 
-            # 2. og:title fallback
+            # try multiple selectors
+            selectors = [
+                "#productTitle",
+                "span#productTitle",
+                "h1"
+            ]
+
+            for sel in selectors:
+                el = page.query_selector(sel)
+                if el:
+                    text = el.inner_text().strip()
+                    if text:
+                        title = text
+                        break
+
+            # fallback: og:title
             if not title:
                 og = page.query_selector('meta[property="og:title"]')
                 if og:
-                    title = og.get_attribute("content").strip()
-
-            # 3. h1 fallback
-            if not title:
-                h1 = page.query_selector("h1")
-                if h1:
-                    title = h1.inner_text().strip()
+                    content = og.get_attribute("content")
+                    if content:
+                        title = content.strip()
 
             if title:
                 return clean_title(title)
@@ -88,9 +98,9 @@ def get_title(page, asin):
             raise Exception("No title found")
 
         except:
-            print(f"Retry {attempt+1} for {asin} (title)")
+            print(f"Retry {attempt+1} for {asin} (title)", flush=True)
             page.reload()
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(6000)
 
     return None
 
@@ -114,16 +124,18 @@ def scrape():
                 url = f"https://www.amazon.com/dp/{asin}"
 
                 page.goto(url, timeout=60000)
-                page.wait_for_timeout(8000)
 
-                # light interaction
+                # longer wait for cloud environments
+                page.wait_for_timeout(12000)
+
+                # light interaction (helps lazy load)
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
 
                 # -----------------------------
-                # TITLE (FIXED BLOCK)
+                # TITLE
                 # -----------------------------
                 title = get_title(page, asin)
 
@@ -134,7 +146,8 @@ def scrape():
                 # -----------------------------
                 # BSR + CATEGORY
                 # -----------------------------
-                bsr = extract_bsr(page.inner_text("body"))
+                body_text = page.inner_text("body")
+                bsr = extract_bsr(body_text)
                 categories = extract_category_ranks(page)
 
                 if categories:
@@ -179,7 +192,15 @@ def save(data):
     except FileNotFoundError:
         pass
 
+    # keep history, only remove exact duplicates
     df = df.drop_duplicates(subset=["timestamp", "asin", "category", "category_rank", "bsr"])
+
+    # fix .0 issue
+    if "bsr" in df.columns:
+        df["bsr"] = pd.to_numeric(df["bsr"], errors="coerce").astype("Int64")
+
+    if "category_rank" in df.columns:
+        df["category_rank"] = pd.to_numeric(df["category_rank"], errors="coerce").astype("Int64")
 
     df.to_csv("bsr_data.csv", index=False)
     print("Saved to CSV")
