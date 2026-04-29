@@ -56,6 +56,45 @@ def extract_category_ranks(page):
         return []
 
 # -----------------------------
+# TITLE EXTRACTION (ROBUST)
+# -----------------------------
+def get_title(page, asin):
+    title = None
+
+    for attempt in range(3):
+        try:
+            page.wait_for_timeout(3000)
+
+            # 1. productTitle
+            el = page.query_selector("#productTitle")
+            if el:
+                title = el.inner_text().strip()
+
+            # 2. og:title fallback
+            if not title:
+                og = page.query_selector('meta[property="og:title"]')
+                if og:
+                    title = og.get_attribute("content").strip()
+
+            # 3. h1 fallback
+            if not title:
+                h1 = page.query_selector("h1")
+                if h1:
+                    title = h1.inner_text().strip()
+
+            if title:
+                return clean_title(title)
+
+            raise Exception("No title found")
+
+        except:
+            print(f"Retry {attempt+1} for {asin} (title)")
+            page.reload()
+            page.wait_for_timeout(5000)
+
+    return None
+
+# -----------------------------
 # SCRAPER
 # -----------------------------
 def scrape():
@@ -74,7 +113,6 @@ def scrape():
             try:
                 url = f"https://www.amazon.com/dp/{asin}"
 
-                # safer than domcontentloaded in cloud
                 page.goto(url, timeout=60000)
                 page.wait_for_timeout(8000)
 
@@ -85,19 +123,9 @@ def scrape():
                 page.wait_for_timeout(1000)
 
                 # -----------------------------
-                # RETRY LOGIC FOR TITLE
+                # TITLE (FIXED BLOCK)
                 # -----------------------------
-                title = None
-
-                for attempt in range(3):
-                    try:
-                        page.wait_for_selector("#productTitle", timeout=15000)
-                        title = clean_title(page.locator("#productTitle").inner_text())
-                        break
-                    except:
-                        print(f"Retry {attempt+1} for {asin}", flush=True)
-                        page.reload()
-                        page.wait_for_timeout(5000)
+                title = get_title(page, asin)
 
                 if not title:
                     print(f"FAILED to load {asin}", flush=True)
@@ -151,10 +179,6 @@ def save(data):
     except FileNotFoundError:
         pass
 
-    # -----------------------------
-    # DO NOT REMOVE HISTORY
-    # -----------------------------
-    # Only remove exact duplicates from the SAME run if they happen
     df = df.drop_duplicates(subset=["timestamp", "asin", "category", "category_rank", "bsr"])
 
     df.to_csv("bsr_data.csv", index=False)
