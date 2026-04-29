@@ -2,6 +2,8 @@ from playwright.sync_api import sync_playwright
 from datetime import datetime
 import pandas as pd
 import re
+import random
+import time
 
 ASINS = [
     "B0D9JQ33BX","B0D1MYMVCC","B0CSZDC243","B0D3XXZRRC","B0D3XXY1HV",
@@ -31,24 +33,16 @@ def extract_bsr(text):
 # -----------------------------
 def extract_category_ranks(page):
     try:
-        bsr_block = page.locator("#detailBulletsWrapper_feature_div").inner_text()
-        lines = bsr_block.split("\n")
+        text = page.inner_text("body")
 
         categories = []
+        matches = re.findall(r"#([\d,]+)\s+in\s+([^\n(]+)", text)
 
-        for line in lines:
-            if "#" in line and "in" in line:
-                parts = line.split(" in ")
-                if len(parts) == 2:
-                    rank_part = parts[0]
-                    category_part = parts[1]
-
-                    rank = int(''.join(filter(str.isdigit, rank_part)))
-
-                    categories.append({
-                        "rank": rank,
-                        "category": category_part.strip()
-                    })
+        for rank, cat in matches:
+            categories.append({
+                "rank": int(rank.replace(",", "")),
+                "category": cat.strip()
+            })
 
         return categories
 
@@ -56,69 +50,32 @@ def extract_category_ranks(page):
         return []
 
 # -----------------------------
-# TITLE EXTRACTION
+# TITLE EXTRACTION (FLEXIBLE)
 # -----------------------------
 def get_title(page, asin):
-    for attempt in range(3):
-        try:
-            page.wait_for_selector(
-                "#productTitle, span#productTitle, h1",
-                timeout=20000
-            )
+    try:
+        # try multiple sources WITHOUT strict waits
+        selectors = ["#productTitle", "span#productTitle", "h1"]
 
-            title = None
+        for sel in selectors:
+            el = page.query_selector(sel)
+            if el:
+                txt = el.inner_text().strip()
+                if txt:
+                    return clean_title(txt)
 
-            for sel in ["#productTitle", "span#productTitle", "h1"]:
-                el = page.query_selector(sel)
-                if el:
-                    text = el.inner_text().strip()
-                    if text:
-                        title = text
-                        break
+        # og:title fallback
+        og = page.query_selector('meta[property="og:title"]')
+        if og:
+            content = og.get_attribute("content")
+            if content:
+                return clean_title(content.strip())
 
-            if not title:
-                og = page.query_selector('meta[property="og:title"]')
-                if og:
-                    content = og.get_attribute("content")
-                    if content:
-                        title = content.strip()
+    except:
+        pass
 
-            if title:
-                return clean_title(title)
-
-            raise Exception("No title found")
-
-        except:
-            print(f"Retry {attempt+1} for {asin} (title)", flush=True)
-            page.reload()
-            page.wait_for_timeout(6000)
-
+    print(f"FAILED TITLE: {asin}", flush=True)
     return None
-
-# -----------------------------
-# BSR EXTRACTION (ROBUST)
-# -----------------------------
-def get_bsr_and_categories(page, asin):
-    for attempt in range(2):
-        try:
-            # wait specifically for BSR container
-            page.wait_for_selector("#detailBulletsWrapper_feature_div", timeout=15000)
-
-            body_text = page.inner_text("body")
-            bsr = extract_bsr(body_text)
-            categories = extract_category_ranks(page)
-
-            if bsr or categories:
-                return bsr, categories
-
-            raise Exception("BSR not found")
-
-        except:
-            print(f"Retry {attempt+1} for {asin} (BSR)", flush=True)
-            page.reload()
-            page.wait_for_timeout(8000)
-
-    return None, []
 
 # -----------------------------
 # SCRAPER
@@ -129,9 +86,12 @@ def scrape():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
 
-        page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
         )
+
+        page = context.new_page()
 
         for asin in ASINS:
             print("START ASIN:", asin, flush=True)
@@ -140,21 +100,33 @@ def scrape():
                 url = f"https://www.amazon.com/dp/{asin}"
                 page.goto(url, timeout=60000)
 
-                page.wait_for_timeout(12000)
+                # RANDOM delay (huge for avoiding blocks)
+                time.sleep(random.uniform(5, 9))
 
-                page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1000)
-                page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1000)
+                # light human-like behavior
+                page.mouse.wheel(0, random.randint(1500, 3000))
+                time.sleep(random.uniform(1, 2))
 
+                # -----------------------------
                 # TITLE
+                # -----------------------------
                 title = get_title(page, asin)
+
                 if not title:
-                    print(f"FAILED TITLE: {asin}", flush=True)
                     continue
 
-                # BSR + CATEGORY (NEW ROBUST LOGIC)
-                bsr, categories = get_bsr_and_categories(page, asin)
+                # -----------------------------
+                # BSR + CATEGORY
+                # -----------------------------
+                body_text = page.inner_text("body")
+
+                # detect bot block page
+                if "captcha" in body_text.lower():
+                    print(f"BLOCKED by Amazon on {asin}", flush=True)
+                    continue
+
+                bsr = extract_bsr(body_text)
+                categories = extract_category_ranks(page)
 
                 if categories:
                     for c in categories:
@@ -178,6 +150,9 @@ def scrape():
 
                 print("DONE:", asin, "BSR:", bsr, "Categories:", len(categories), flush=True)
 
+                # delay between ASINs (VERY important)
+                time.sleep(random.uniform(4, 8))
+
             except Exception as e:
                 print(f"ERROR on {asin}: {e}", flush=True)
                 continue
@@ -200,7 +175,7 @@ def save(data):
 
     df = df.drop_duplicates(subset=["timestamp", "asin", "category", "category_rank", "bsr"])
 
-    # fix numeric formatting
+    # fix .0 issue
     if "bsr" in df.columns:
         df["bsr"] = pd.to_numeric(df["bsr"], errors="coerce").astype("Int64")
 
