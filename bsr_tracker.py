@@ -69,16 +69,20 @@ def scrape():
         )
 
         for asin in ASINS:
+            print("START ASIN:", asin, flush=True)
+
             try:
                 url = f"https://www.amazon.com/dp/{asin}"
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-                page.wait_for_timeout(12000)
+                # safer than domcontentloaded in cloud
+                page.goto(url, timeout=60000)
+                page.wait_for_timeout(8000)
 
+                # light interaction
                 page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(1000)
                 page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(1000)
 
                 # -----------------------------
                 # RETRY LOGIC FOR TITLE
@@ -87,16 +91,16 @@ def scrape():
 
                 for attempt in range(3):
                     try:
-                        page.wait_for_selector("#productTitle", timeout=20000)
+                        page.wait_for_selector("#productTitle", timeout=15000)
                         title = clean_title(page.locator("#productTitle").inner_text())
                         break
                     except:
-                        print(f"Retry {attempt+1} for {asin}")
+                        print(f"Retry {attempt+1} for {asin}", flush=True)
                         page.reload()
                         page.wait_for_timeout(5000)
 
                 if not title:
-                    print(f"FAILED to load {asin}")
+                    print(f"FAILED to load {asin}", flush=True)
                     continue
 
                 # -----------------------------
@@ -125,10 +129,10 @@ def scrape():
                         "category_rank": None
                     })
 
-                print("ASIN:", asin, "BSR:", bsr, "Categories:", len(categories))
+                print("DONE:", asin, "BSR:", bsr, "Categories:", len(categories), flush=True)
 
             except Exception as e:
-                print(f"ERROR on {asin}: {e}")
+                print(f"ERROR on {asin}: {e}", flush=True)
                 continue
 
         browser.close()
@@ -147,23 +151,16 @@ def save(data):
     except FileNotFoundError:
         pass
 
-    # -----------------------------
-    # CLEAN DATA TYPES (FIX .0 ISSUE)
-    # -----------------------------
+    # clean numeric types
     if "bsr" in df.columns:
         df["bsr"] = pd.to_numeric(df["bsr"], errors="coerce").astype("Int64")
 
     if "category_rank" in df.columns:
         df["category_rank"] = pd.to_numeric(df["category_rank"], errors="coerce").astype("Int64")
 
-    # -----------------------------
-    # CLEAN DUPLICATES
-    # -----------------------------
+    # remove duplicates safely
     df = df.drop_duplicates()
 
-    # -----------------------------
-    # SAVE
-    # -----------------------------
     df.to_csv("bsr_data.csv", index=False)
 
     print("Saved to CSV")
